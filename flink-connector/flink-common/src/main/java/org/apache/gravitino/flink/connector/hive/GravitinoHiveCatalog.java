@@ -42,11 +42,13 @@ import org.apache.flink.table.catalog.hive.HiveCatalog;
 import org.apache.flink.table.factories.Factory;
 import org.apache.gravitino.Catalog;
 import org.apache.gravitino.NameIdentifier;
+import org.apache.gravitino.credential.AwsIrsaCredential;
 import org.apache.gravitino.credential.AzureAccountKeyCredential;
 import org.apache.gravitino.credential.Credential;
 import org.apache.gravitino.credential.CredentialPropertyUtils;
 import org.apache.gravitino.credential.OSSSecretKeyCredential;
 import org.apache.gravitino.credential.S3SecretKeyCredential;
+import org.apache.gravitino.credential.S3TokenCredential;
 import org.apache.gravitino.exceptions.ForbiddenException;
 import org.apache.gravitino.exceptions.NoSuchCatalogException;
 import org.apache.gravitino.exceptions.NoSuchSchemaException;
@@ -84,13 +86,39 @@ public class GravitinoHiveCatalog extends BaseCatalog {
       PartitionConverter partitionConverter,
       @Nullable HiveConf hiveConf,
       @Nullable String hiveVersion) {
+    this(
+        catalogName,
+        defaultDatabase,
+        catalogOptions,
+        schemaAndTablePropertiesConverter,
+        partitionConverter,
+        new HiveCatalog(catalogName, defaultDatabase, hiveConf, hiveVersion));
+  }
+
+  /**
+   * Creates a Gravitino Hive catalog backed by the supplied native Flink Hive catalog.
+   *
+   * @param catalogName catalog name
+   * @param defaultDatabase default database
+   * @param catalogOptions catalog options
+   * @param schemaAndTablePropertiesConverter schema and table property converter
+   * @param partitionConverter partition converter
+   * @param hiveCatalog native Flink Hive catalog
+   */
+  protected GravitinoHiveCatalog(
+      String catalogName,
+      String defaultDatabase,
+      Map<String, String> catalogOptions,
+      SchemaAndTablePropertiesConverter schemaAndTablePropertiesConverter,
+      PartitionConverter partitionConverter,
+      HiveCatalog hiveCatalog) {
     super(
         catalogName,
         catalogOptions,
         defaultDatabase,
         schemaAndTablePropertiesConverter,
         partitionConverter);
-    this.hiveCatalog = new HiveCatalog(catalogName, defaultDatabase, hiveConf, hiveVersion);
+    this.hiveCatalog = Preconditions.checkNotNull(hiveCatalog, "hiveCatalog must not be null");
   }
 
   public HiveConf getHiveConf() {
@@ -117,6 +145,14 @@ public class GravitinoHiveCatalog extends BaseCatalog {
         S3SecretKeyCredential s3 = (S3SecretKeyCredential) credential;
         conf.set("fs.s3a.access.key", s3.accessKeyId());
         conf.set("fs.s3a.secret.key", s3.secretAccessKey());
+      } else if (credential instanceof S3TokenCredential) {
+        S3TokenCredential s3Token = (S3TokenCredential) credential;
+        applyTemporaryS3Credential(
+            conf, s3Token.accessKeyId(), s3Token.secretAccessKey(), s3Token.sessionToken());
+      } else if (credential instanceof AwsIrsaCredential) {
+        AwsIrsaCredential irsa = (AwsIrsaCredential) credential;
+        applyTemporaryS3Credential(
+            conf, irsa.accessKeyId(), irsa.secretAccessKey(), irsa.sessionToken());
       } else if (credential instanceof OSSSecretKeyCredential) {
         OSSSecretKeyCredential oss = (OSSSecretKeyCredential) credential;
         conf.set("fs.oss.accessKeyId", oss.accessKeyId());
@@ -263,6 +299,16 @@ public class GravitinoHiveCatalog extends BaseCatalog {
       throw new CatalogException("Generic table must be a resolved catalog table");
     }
     applyGenericTableAlter(tablePath, table, (ResolvedCatalogTable) newTable);
+  }
+
+  private static void applyTemporaryS3Credential(
+      Configuration conf, String accessKeyId, String secretAccessKey, String sessionToken) {
+    conf.set("fs.s3a.access.key", accessKeyId);
+    conf.set("fs.s3a.secret.key", secretAccessKey);
+    conf.set("fs.s3a.session.token", sessionToken);
+    conf.set(
+        "fs.s3a.aws.credentials.provider",
+        "org.apache.hadoop.fs.s3a.TemporaryAWSCredentialsProvider");
   }
 
   private Table loadGravitinoTable(ObjectPath tablePath, boolean ignoreIfNotExists)
